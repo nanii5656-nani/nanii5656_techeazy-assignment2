@@ -1,4 +1,16 @@
+# Terraform state & binaries
 .terraform/
 *.tfstate
 *.tfstate.backup
 
+# AWS credentials
+*.pem
+*.key
+*.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
