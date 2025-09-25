@@ -173,4 +173,3 @@ resource "aws_instance" "app" {
     Name = "assignment2-ec2-uploader"
   }
 }
-
