@@ -164,3 +164,8 @@ echo "Bucket: $BUCKET_NAME"
 
 echo "To verify listing as read-only role:"
 echo "aws sts assume-role --role-arn $ROLE_READ_ARN --role-session-name verify-list | jq -r .Credentials"
+
+echo "# PR test" >> README.md
+git add README.md
+git commit -m "Dummy commit to enable PR creation"
+git push origin feat/assignment-2-clean
