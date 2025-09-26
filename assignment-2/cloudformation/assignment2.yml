@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Assignment 2 - create roles, EC2 instance profile, private bucket, lifecycle, shutdown upload
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: "S3 bucket name (must be provided)"
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: ""
+    Description: "Optional existing key pair name"
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0abcdef1234567890
+
+Resources:
+  # IAM Role: read-only
+  RoleReadOnly:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: assignment2_s3_read_only
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns: []
+
+  ReadOnlyPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: assignment2_s3_read_only_policy
+      Roles:
+        - !Ref RoleReadOnly
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetObject
+            Resource:
+              - !Sub arn:aws:s3:::${BucketName}
+              - !Sub arn:aws:s3:::${BucketName}/*
+
+  # IAM Role: uploader (create bucket and put objects, deny reading)
+  RoleUploader:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: assignment2_s3_uploader
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+
+  UploaderPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: assignment2_s3_uploader_policy
+      Roles:
+        - !Ref RoleUploader
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:CreateBucket
+              - s3:PutObject
+              - s3:PutObjectAcl
+              - s3:PutObjectTagging
+              - s3:PutBucketAcl
+              - s3:PutBucketTagging
+              - s3:ListAllMyBuckets
+            Resource: "*"
+          - Sid: DenyRead
+            Effect: Deny
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::${BucketName}
+              - !Sub arn:aws:s3:::${BucketName}/*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: assignment2_uploader_profile
+      Roles:
+        - !Ref RoleUploader
+
+  # S3 Bucket
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteAfter7Days
+            Status: Enabled
+            ExpirationInDays: 7
+
+  # Security group - allow ssh inbound (change as needed)
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH (assignment2)
+      VpcId: !Ref "AWS::NoValue" # default VPC used by EC2 launch template if omitted
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKey, !Ref KeyName, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          if ! command -v aws >/dev/null 2>&1; then
+            apt-get update -y
+            apt-get install -y unzip curl
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip"
+            unzip /tmp/awscliv2.zip -d /tmp
+            /tmp/aws/install
+          fi
+          cat >/opt/shutdown-upload.sh <<'SH'
+          #!/bin/bash
+          BUCKET="${BucketName}"
+          TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          DEST_PREFIX="ec2-logs/${TS}"
+          if [ -f /var/log/cloud-init.log ]; then
+            aws s3 cp /var/log/cloud-init.log s3://$BUCKET/${DEST_PREFIX}/cloud-init.log
+          fi
+          if [ -d /var/www/app/logs ]; then
+            aws s3 cp --recursive /var/www/app/logs s3://$BUCKET/app/logs/${TS}/
+          fi
+          SH
+          chmod +x /opt/shutdown-upload.sh
+          cat >/etc/systemd/system/shutdown-upload.service <<'SRV'
+          [Unit]
+          Description=Upload logs to S3 at shutdown
+          DefaultDependencies=no
+          Before=shutdown.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/true
+          ExecStop=/opt/shutdown-upload.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          SRV
+          systemctl daemon-reload
+          systemctl enable shutdown-upload.service
+
+Conditions:
+  HasKey: !Not [!Equals [!Ref KeyName, ""]]
+
+Outputs:
+  UploadRoleARN:
+    Description: ARN of uploader role
+    Value: !GetAtt RoleUploader.Arn
+  ReadOnlyRoleARN:
+    Description: ARN of read-only role
+    Value: !GetAtt RoleReadOnly.Arn
+  BucketName:
+    Description: S3 bucket name
+    Value: !Ref BucketName
